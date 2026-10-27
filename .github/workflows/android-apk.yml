@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract Android project ZIP
+      - name: Find and extract Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -32,7 +32,7 @@ jobs:
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP"
+          echo "ZIP found: $ZIP"
           mkdir -p extracted
           unzip -o "$ZIP" -d extracted
 
@@ -59,25 +59,69 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Fix Java and Kotlin JVM targets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT_DIR"])
+          gradle_file = project / "app" / "build.gradle"
+
+          if not gradle_file.exists():
+              raise SystemExit(f"ERROR: File nahi mili: {gradle_file}")
+
+          text = gradle_file.read_text()
+
+          if "compileOptions {" not in text:
+              text = text.replace(
+                  "android {",
+                  """android {
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          """,
+                  1
+              )
+
+          if "kotlinOptions {" not in text:
+              text = text.replace(
+                  "android {",
+                  """android {
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+          """,
+                  1
+              )
+
+          gradle_file.write_text(text)
+          print("Updated app/build.gradle:")
+          print(text)
+          PY
+
       - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-
           gradle --no-daemon assembleDebug
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK generate nahi hui."
+            echo "ERROR: APK nahi bani."
             find app/build/outputs -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK successfully generated: $APK"
+          echo "APK successfully generated."
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BlueyBuddy-debug-apk
