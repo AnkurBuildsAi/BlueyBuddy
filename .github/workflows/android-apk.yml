@@ -17,16 +17,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
+      - name: Extract Android project ZIP
         run: |
           ZIP=$(find . -maxdepth 2 -type f -name 'BlueyBuddy-Android-Source-and-APK-Build.zip' | head -n 1)
           if [ -z "$ZIP" ]; then
-            echo "Project ZIP not found"
+            echo "Project ZIP not found. Check the uploaded ZIP filename."
+            find . -maxdepth 2 -type f
             exit 1
           fi
           mkdir -p extracted
           unzip -q "$ZIP" -d extracted
           echo "PROJECT_DIR=$GITHUB_WORKSPACE/extracted/BlueyAndroidStarter" >> "$GITHUB_ENV"
+
+      - name: Fix Java and Kotlin JVM targets
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          p = Path(os.environ["GITHUB_WORKSPACE"]) / "extracted/BlueyAndroidStarter/app/build.gradle"
+          if not p.exists():
+              raise SystemExit("app/build.gradle not found inside the ZIP")
+          s = p.read_text()
+          if "compileOptions {" not in s:
+              s = s.replace(
+                  "    defaultConfig {",
+                  "    compileOptions {\n"
+                  "        sourceCompatibility JavaVersion.VERSION_1_8\n"
+                  "        targetCompatibility JavaVersion.VERSION_1_8\n"
+                  "    }\n\n    defaultConfig {",
+                  1
+              )
+          if "kotlinOptions {" not in s:
+              i = s.rfind("\n}")
+              if i < 0:
+                  raise SystemExit("Could not locate end of android block")
+              s = s[:i] + "\n\n    kotlinOptions {\n        jvmTarget = '1.8'\n    }\n" + s[i:]
+          p.write_text(s)
+          print("JVM target settings updated")
+          PY
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -51,3 +80,6 @@ jobs:
           path: extracted/BlueyAndroidStarter/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
+
+
+
