@@ -23,19 +23,19 @@ jobs:
       - name: Find and extract Android source ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -eu
 
           ZIP="./BlueyBuddy-Fresh-Android-Source.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error::Source ZIP not found: $ZIP"
+            echo "::error::ZIP not found: $ZIP"
             find . -maxdepth 3 -type f -not -path './.git/*'
             exit 1
           fi
 
+          unzip -tq "$ZIP"
           rm -rf extracted
           mkdir -p extracted
-          unzip -tq "$ZIP"
           unzip -q "$ZIP" -d extracted
 
           PROJECT="$(find extracted -name settings.gradle -type f -print -quit | xargs -r dirname)"
@@ -44,13 +44,13 @@ jobs:
              [ ! -f "$PROJECT/build.gradle" ] || \
              [ ! -f "$PROJECT/app/build.gradle" ] || \
              [ ! -f "$PROJECT/app/src/main/AndroidManifest.xml" ]; then
-            echo "::error::Valid Android project not found"
+            echo "::error::Android project files missing"
             find extracted -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
-          echo "Android project found: $PROJECT"
+          echo "Project found: $PROJECT"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -59,18 +59,17 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          set -euo pipefail
-          yes | sdkmanager --licenses
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools'
 
       - name: Install Android SDK packages
         shell: bash
         run: |
-          set -euo pipefail
+          set -eu
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
@@ -78,12 +77,22 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -eu
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          echo "Project verification passed."
+
       - name: Build debug APK
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -eu
           cd "$PROJECT_DIR"
+
           gradle --no-daemon --stacktrace assembleDebug
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
@@ -94,7 +103,7 @@ jobs:
             exit 1
           fi
 
-          echo "APK build successful"
+          echo "APK generated successfully."
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
