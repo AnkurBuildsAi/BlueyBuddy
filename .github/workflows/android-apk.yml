@@ -28,7 +28,7 @@ jobs:
           ZIP="./BlueyBuddy-Fresh-Android-Source.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error::ZIP not found: $ZIP"
+            echo "::error::Source ZIP not found: $ZIP"
             find . -maxdepth 3 -type f -not -path './.git/*'
             exit 1
           fi
@@ -41,16 +41,36 @@ jobs:
           PROJECT="$(find extracted -name settings.gradle -type f -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT" ] || \
-             [ ! -f "$PROJECT/build.gradle" ] || \
              [ ! -f "$PROJECT/app/build.gradle" ] || \
              [ ! -f "$PROJECT/app/src/main/AndroidManifest.xml" ]; then
-            echo "::error::Android project files missing"
+            echo "::error::Android project files are missing"
             find extracted -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
-          echo "Project found: $PROJECT"
+          echo "Android project found: $PROJECT"
+
+      - name: Fix singleLine Kotlin compile error
+        shell: bash
+        run: |
+          set -eu
+
+          FILE="$PROJECT_DIR/app/src/main/java/com/blueybuddy/agent/MainActivity.kt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::MainActivity.kt not found: $FILE"
+            exit 1
+          fi
+
+          sed -i 's/singleLine = true/setSingleLine(true)/g' "$FILE"
+
+          if grep -n 'singleLine = true' "$FILE"; then
+            echo "::error::singleLine compile error remains"
+            exit 1
+          fi
+
+          echo "Kotlin singleLine fix checked."
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -77,16 +97,6 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Verify Android project
-        shell: bash
-        run: |
-          set -eu
-          test -f "$PROJECT_DIR/settings.gradle"
-          test -f "$PROJECT_DIR/build.gradle"
-          test -f "$PROJECT_DIR/app/build.gradle"
-          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
-          echo "Project verification passed."
-
       - name: Build debug APK
         shell: bash
         run: |
@@ -105,7 +115,7 @@ jobs:
 
           echo "APK generated successfully."
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BlueyBuddy-debug-apk
