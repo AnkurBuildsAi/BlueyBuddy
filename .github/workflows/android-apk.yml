@@ -1,5 +1,5 @@
 
-name: Build Bluey Buddy Agent APK
+name: Build Bluey Buddy APK
 
 on:
   workflow_dispatch:
@@ -7,70 +7,62 @@ on:
     branches:
       - main
       - master
+    paths-ignore:
+      - '**.md'
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build Bluey Buddy Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract Android source ZIP
+      - name: Find Android project
+        id: source
         shell: bash
         run: |
-          set -eu
+          set -euo pipefail
 
-          ZIP="./BlueyBuddy-Fresh-Android-Source.zip"
+          if [ -f settings.gradle ] && [ -f app/build.gradle ]; then
+            PROJECT="$GITHUB_WORKSPACE"
+          else
+            ZIP=""
 
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::Source ZIP not found: $ZIP"
-            find . -maxdepth 3 -type f -not -path './.git/*'
-            exit 1
+            for candidate in \
+              "$GITHUB_WORKSPACE/BlueyBuddy-Android-Source.zip" \
+              "$GITHUB_WORKSPACE/BlueyBuddy-Fresh-Android-Source.zip" \
+              "$GITHUB_WORKSPACE/BlueyBuddy-Full-Offline-Source.zip"; do
+              if [ -f "$candidate" ]; then
+                ZIP="$candidate"
+                break
+              fi
+            done
+
+            if [ -z "$ZIP" ]; then
+              echo "Android project or supported source ZIP not found."
+              find . -maxdepth 3 -type f -not -path './.git/*' -print
+              exit 1
+            fi
+
+            mkdir -p .build-source
+            unzip -q "$ZIP" -d .build-source
+
+            PROJECT="$(find .build-source -name settings.gradle -type f -print -quit | xargs -r dirname)"
+
+            if [ -z "$PROJECT" ] || [ ! -f "$PROJECT/app/build.gradle" ]; then
+              echo "Valid Android Gradle project not found inside ZIP."
+              exit 1
+            fi
           fi
 
-          unzip -tq "$ZIP"
-          rm -rf extracted
-          mkdir -p extracted
-          unzip -q "$ZIP" -d extracted
-
-          PROJECT="$(find extracted -name settings.gradle -type f -print -quit | xargs -r dirname)"
-
-          if [ -z "$PROJECT" ] || \
-             [ ! -f "$PROJECT/app/build.gradle" ] || \
-             [ ! -f "$PROJECT/app/src/main/AndroidManifest.xml" ]; then
-            echo "::error::Android project files are missing"
-            find extracted -maxdepth 5 -type f
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
-          echo "Android project found: $PROJECT"
-
-      - name: Fix singleLine Kotlin compile error
-        shell: bash
-        run: |
-          set -eu
-
-          FILE="$PROJECT_DIR/app/src/main/java/com/blueybuddy/agent/MainActivity.kt"
-
-          if [ ! -f "$FILE" ]; then
-            echo "::error::MainActivity.kt not found: $FILE"
-            exit 1
-          fi
-
-          sed -i 's/singleLine = true/setSingleLine(true)/g' "$FILE"
-
-          if grep -n 'singleLine = true' "$FILE"; then
-            echo "::error::singleLine compile error remains"
-            exit 1
-          fi
-
-          echo "Kotlin singleLine fix checked."
+          echo "project_dir=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "Project found: $PROJECT"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -79,46 +71,53 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: '15859902'
-          accept-android-sdk-licenses: 'true'
-          log-accepted-android-sdk-licenses: 'false'
-          packages: 'platform-tools'
+        uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -eu
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      - name: Verify project files
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.source.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/java/com/blueybuddy/agent/MainActivity.kt"
+          test -f "$PROJECT_DIR/app/src/main/java/com/blueybuddy/agent/VirtualPetActivity.kt"
+          test -f "$PROJECT_DIR/app/src/main/java/com/blueybuddy/agent/AgentEngine.kt"
+
+          echo "Project file checks passed."
+
       - name: Build debug APK
         shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.source.outputs.project_dir }}
         run: |
-          set -eu
+          set -euo pipefail
           cd "$PROJECT_DIR"
 
-          gradle --no-daemon --stacktrace assembleDebug
+          gradle --no-daemon --stacktrace clean assembleDebug
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
 
-          if [ ! -s "$APK" ]; then
-            echo "::error::APK was not generated"
-            find app/build/outputs -type f -print 2>/dev/null || true
-            exit 1
-          fi
+          echo "APK created successfully."
+          sha256sum "$APK"
 
-          echo "APK generated successfully."
-
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BlueyBuddy-debug-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          name: BlueyBuddy-Android-8.1-debug-APK
+          path: ${{ steps.source.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
