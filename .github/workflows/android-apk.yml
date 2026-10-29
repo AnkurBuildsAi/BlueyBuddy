@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Bluey Buddy Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -28,30 +28,26 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK tools
-        uses: android-actions/setup-android@v3
+      # Let this action handle SDK licenses.
+      # Do not run "yes | sdkmanager --licenses".
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
         with:
-          accept-android-sdk-licenses: "false"
+          accept-android-sdk-licenses: "true"
           log-accepted-android-sdk-licenses: "false"
           packages: ""
 
-      - name: Accept Android SDK licenses
+      - name: Install required Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null
-          echo "SDK license step completed."
 
-      - name: Install required SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
           sdkmanager --install \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "platform-tools"
 
-      - name: Locate Android project
+      - name: Find Android project
         id: project
         shell: bash
         run: |
@@ -60,17 +56,14 @@ jobs:
           ROOT="$GITHUB_WORKSPACE"
           PROJECT=""
 
-          for DIR in "$ROOT" "$ROOT/BlueyBuddy" "$ROOT/.build-source"; do
-            if { [ -f "$DIR/settings.gradle" ] || \
-                 [ -f "$DIR/settings.gradle.kts" ]; } && \
-               { [ -f "$DIR/app/build.gradle" ] || \
-                 [ -f "$DIR/app/build.gradle.kts" ]; }; then
-              PROJECT="$DIR"
-              break
-            fi
-          done
-
-          if [ -z "$PROJECT" ]; then
+          # First check whether Gradle files are already in the repository.
+          if { [ -f "$ROOT/settings.gradle" ] || \
+               [ -f "$ROOT/settings.gradle.kts" ]; } && \
+             { [ -f "$ROOT/app/build.gradle" ] || \
+               [ -f "$ROOT/app/build.gradle.kts" ]; }; then
+            PROJECT="$ROOT"
+          else
+            # Otherwise, extract a supported source ZIP if one exists.
             mkdir -p "$ROOT/.build-source"
 
             for ZIP in \
@@ -83,30 +76,45 @@ jobs:
               fi
             done
 
-            PROJECT="$(find "$ROOT/.build-source" \
-              -type f \( -name settings.gradle \
-              -o -name settings.gradle.kts \) \
-              -print -quit | xargs -r dirname || true)"
+            # Find the Gradle project inside the extracted source.
+            while IFS= read -r SETTINGS; do
+              DIR="$(dirname "$SETTINGS")"
+
+              if { [ -f "$DIR/app/build.gradle" ] || \
+                   [ -f "$DIR/app/build.gradle.kts" ]; }; then
+                PROJECT="$DIR"
+                break
+              fi
+            done < <(
+              find "$ROOT/.build-source" -type f \
+                \( -name settings.gradle \
+                -o -name settings.gradle.kts \) \
+                -print 2>/dev/null
+            )
           fi
 
           if [ -z "$PROJECT" ]; then
-            echo "::error::Android project not found. Check repository source files."
+            echo "::error::Android project not found."
+            echo "Expected Gradle files in the repository or a supported source ZIP."
             find "$ROOT" -maxdepth 4 -type f \
               -not -path '*/.git/*' | head -200
             exit 1
           fi
 
           echo "project_dir=$PROJECT" >> "$GITHUB_OUTPUT"
-          echo "Found project: $PROJECT"
+          echo "Android project found: $PROJECT"
 
-      - name: Validate project
+      - name: Validate Android project
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          if [ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]; then
+            echo "::error::AndroidManifest.xml is missing."
+            exit 1
+          fi
 
           if [ ! -f "$PROJECT_DIR/build.gradle" ] && \
              [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
@@ -125,7 +133,7 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Build APK
+      - name: Build debug APK
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
         shell: bash
@@ -140,10 +148,22 @@ jobs:
             gradle --no-daemon --stacktrace assembleDebug
           fi
 
-          test -n "$(find app/build/outputs/apk/debug \
-            -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          APK_DIR="app/build/outputs/apk/debug"
 
-      - name: Upload APK artifact
+          if [ ! -d "$APK_DIR" ]; then
+            echo "::error::APK output directory was not created."
+            exit 1
+          fi
+
+          find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" -print
+
+          if ! find "$APK_DIR" -maxdepth 1 -type f \
+               -name "*.apk" -print -quit | grep -q .; then
+            echo "::error::Build finished without generating an APK."
+            exit 1
+          fi
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: BlueyBuddy-debug-APK
