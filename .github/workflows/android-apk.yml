@@ -3,7 +3,9 @@ name: ORBO Android APK Build
 
 'on':
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -15,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build ORBO Android APK
+    name: Build ORBO APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -24,33 +26,43 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Locate and extract project
+      - name: Extract ORBO ZIP and locate project
         shell: bash
         run: |
           set -euo pipefail
 
           SEARCH_ROOT="$GITHUB_WORKSPACE"
-          ZIP_FILE="$(find . -maxdepth 3 -type f \
+
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 3 \
+            -type f \
             -name 'ORBO_Android_Project_Source.zip' \
+            -not -path '*/.git/*' \
             -print -quit)"
 
           if [ -n "$ZIP_FILE" ]; then
+            echo "ORBO ZIP found."
+            unzip -tq "$ZIP_FILE"
             mkdir -p "$RUNNER_TEMP/orbo-source"
             unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/orbo-source"
             SEARCH_ROOT="$RUNNER_TEMP/orbo-source"
+          else
+            echo "ZIP not found. Checking repository source."
           fi
 
-          SETTINGS_FILE="$(find "$SEARCH_ROOT" -type f \
+          SETTINGS_FILE="$(find "$SEARCH_ROOT" \
+            -type f \
             \( -name settings.gradle -o -name settings.gradle.kts \) \
-            -not -path '*/.gradle/*' -print -quit)"
+            -not -path '*/.gradle/*' \
+            -print -quit)"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android Gradle project not found."
+            echo "ERROR: settings.gradle not found."
             exit 1
           fi
 
@@ -58,82 +70,190 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
              [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "ERROR: App Gradle file not found."
+            echo "ERROR: app Gradle file not found."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project found: $PROJECT_DIR"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-          accept-android-sdk-licenses: true
-
-      - name: Install Android SDK packages
+      - name: Automatically fix Java compatibility
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager --install \
-            "platforms;android-34" \
-            "platforms;android-35" \
-            "platforms;android-36" \
-            "build-tools;34.0.0" \
-            "build-tools;35.0.0" \
-            "build-tools;36.0.0"
+          python3 - "$PROJECT_DIR" <<'PY'
+          from pathlib import Path
+          import sys
 
-      - name: Set up Gradle
+          root = Path(sys.argv[1])
+          files = list(root.rglob("*.gradle"))
+          files += list(root.rglob("*.gradle.kts"))
+
+          for path in files:
+              old = path.read_text(encoding="utf-8")
+              new = old.replace(
+                  "JavaVersion.VERSION_8",
+                  "JavaVersion.VERSION_1_8"
+              )
+              if old != new:
+                  path.write_text(new, encoding="utf-8")
+                  print("Fixed:", path)
+
+          app = root / "app" / "build.gradle"
+          if not app.exists():
+              app = root / "app" / "build.gradle.kts"
+
+          if not app.exists():
+              raise SystemExit("ERROR: App Gradle file missing.")
+
+          if "JavaVersion.VERSION_8" in app.read_text(encoding="utf-8"):
+              raise SystemExit("ERROR: Invalid Java version remains.")
+
+          print("Java compatibility check passed.")
+          PY
+
+      - name: Verify ORBO source files and XML
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$PROJECT_DIR/tools/verify_source.py" ]; then
+            python3 "$PROJECT_DIR/tools/verify_source.py"
+          else
+            echo "Source verification script not found; continuing."
+          fi
+
+      - name: Locate Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          if [ ! -d "$SDK_ROOT/cmdline-tools" ]; then
+            echo "ERROR: Android SDK command-line tools not found."
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f -name sdkmanager -print | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+
+          chmod +x "$SDKMANAGER"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "SDKMANAGER_PATH=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          echo "SDK located successfully."
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set +e
+
+          yes | "$SDKMANAGER_PATH" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses > "$RUNNER_TEMP/sdk-licenses.log" 2>&1
+
+          SDK_STATUS=${PIPESTATUS[1]}
+          set -e
+
+          cat "$RUNNER_TEMP/sdk-licenses.log"
+
+          if [ "$SDK_STATUS" -ne 0 ]; then
+            echo "ERROR: SDK license acceptance failed."
+            exit "$SDK_STATUS"
+          fi
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$SDKMANAGER_PATH" \
+            --sdk_root="$ANDROID_HOME" \
+            --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Verify project
+      - name: Verify Gradle project
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
 
           test -f settings.gradle || test -f settings.gradle.kts
           test -f app/build.gradle || test -f app/build.gradle.kts
 
-          echo "Project structure verified."
+          java -version
+          gradle --version
 
-      - name: Build and test APK
+          echo "Gradle project check passed."
+
+      - name: Build and run unit tests
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
 
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
-            ./gradlew --no-daemon --stacktrace \
-              clean testDebugUnitTest assembleDebug
+
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              clean \
+              testDebugUnitTest \
+              assembleDebug
           else
-            gradle --no-daemon --stacktrace \
-              clean testDebugUnitTest assembleDebug
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              clean \
+              testDebugUnitTest \
+              assembleDebug
           fi
 
-      - name: Verify APK
+      - name: Check generated APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find "$PROJECT_DIR" -type f \
+          APK_FILE="$(find "$PROJECT_DIR" \
+            -type f \
             -path '*/build/outputs/apk/debug/*.apk' \
             -print -quit)"
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK not generated."
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK was not generated."
             exit 1
           fi
 
-          mkdir -p dist
-          cp "$APK" dist/ORBO-debug.apk
-          ls -lh dist/ORBO-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/dist"
 
-      - name: Upload APK artifact
+          cp "$APK_FILE" "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
+
+          test -s "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
+
+          echo "APK generated successfully:"
+          ls -lh "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
+
+      - name: Upload ORBO APK
         uses: actions/upload-artifact@v4
         with:
           name: ORBO-debug-apk
