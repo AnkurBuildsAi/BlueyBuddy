@@ -82,14 +82,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
+      - name: Accept Android SDK licenses (runner ka preinstalled SDK)
         shell: bash
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          echo "SDK licenses accepted (non-interactive)."
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls -la "$ANDROID_HOME" || true
+          if [ -x "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /tmp/licenses.log 2>&1 || true
+            tail -n 5 /tmp/licenses.log || true
+          else
+            echo "::warning::sdkmanager nahi mila: $SDKM"
+          fi
 
       - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
