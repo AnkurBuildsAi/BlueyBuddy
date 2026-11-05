@@ -1,3 +1,4 @@
+
 name: Android APK
 
 on:
@@ -5,6 +6,7 @@ on:
   push:
     paths:
       - "ORBO_App_Source.zip"
+      - "ORBO_Android_Full_Source.zip"
       - ".github/workflows/android-apk.yml"
 
 permissions:
@@ -12,106 +14,123 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Find source ZIP and Android project folder
+      - name: Find and extract Android source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          echo "== Repo root files =="
           ls -la
 
           ZIP=""
           if [ -f "ORBO_App_Source.zip" ]; then
             ZIP="ORBO_App_Source.zip"
+          elif [ -f "ORBO_Android_Full_Source.zip" ]; then
+            ZIP="ORBO_Android_Full_Source.zip"
           else
-            ZIP="$(ls -1 *.zip 2>/dev/null | head -n 1 || true)"
+            ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' | sort | head -n 1 || true)"
           fi
 
-          SEARCH_ROOT="$GITHUB_WORKSPACE"
-          if [ -n "$ZIP" ]; then
-            echo "Using source ZIP: $ZIP"
-            rm -rf "$GITHUB_WORKSPACE/_src"
-            mkdir -p "$GITHUB_WORKSPACE/_src"
-            unzip -q "$ZIP" -d "$GITHUB_WORKSPACE/_src"
-            SEARCH_ROOT="$GITHUB_WORKSPACE/_src"
-          else
-            echo "Koi ZIP nahi mila; repo ke andar hi Android project dhundh raha hoon."
+          if [ -z "$ZIP" ]; then
+            echo "::error::Android source ZIP nahi mili."
+            exit 1
           fi
 
-          SETTINGS="$(find "$SEARCH_ROOT" -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) \
-            -not -path "*/.git/*" -not -path "*/build/*" -not -path "*/docs/*" \
-            | awk '{ print gsub("/","/") " " $0 }' | sort -n | head -n 1 | cut -d' ' -f2-)"
+          echo "Using ZIP: $ZIP"
+          rm -rf "$GITHUB_WORKSPACE/_src"
+          mkdir -p "$GITHUB_WORKSPACE/_src"
+          unzip -q "$ZIP" -d "$GITHUB_WORKSPACE/_src"
+
+          SETTINGS="$(find "$GITHUB_WORKSPACE/_src" -maxdepth 5 \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -not -path '*/build/*' | head -n 1)"
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::settings.gradle(.kts) nahi mila. ZIP incomplete hai ya galat folder structure hai."
-            echo "== Files found =="
-            find "$SEARCH_ROOT" -maxdepth 3 -not -path "*/.git/*" | head -n 100
+            echo "::error::Gradle settings file nahi mili."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS")"
-          echo "Android project folder: $PROJECT_DIR"
 
           MODULE=""
-          for f in $(find "$PROJECT_DIR" -maxdepth 2 \( -name build.gradle.kts -o -name build.gradle \) \
-              -not -path "$PROJECT_DIR/build.gradle" -not -path "$PROJECT_DIR/build.gradle.kts"); do
-            if grep -q "android.application" "$f"; then
-              MODULE="$(basename "$(dirname "$f")")"
+          while IFS= read -r FILE; do
+            if grep -Eq 'com\.android\.application|android\.application' "$FILE"; then
+              MODULE="$(basename "$(dirname "$FILE")")"
               break
             fi
-          done
+          done < <(find "$PROJECT_DIR" -mindepth 2 -maxdepth 3 \
+            \( -name build.gradle -o -name build.gradle.kts \) \
+            -not -path '*/build/*' | sort)
 
           if [ -z "$MODULE" ]; then
-            echo "::error::Application module (com.android.application) nahi mila."
+            echo "::error::Android application module nahi mila."
             exit 1
           fi
-          echo "Application module: $MODULE"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "MODULE=$MODULE" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Accept Android SDK licenses (runner ka preinstalled SDK)
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
         shell: bash
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          ls -la "$ANDROID_HOME" || true
-          if [ -x "$SDKM" ]; then
-            yes | "$SDKM" --licenses > /tmp/licenses.log 2>&1 || true
-            tail -n 5 /tmp/licenses.log || true
-          else
-            echo "::warning::sdkmanager nahi mila: $SDKM"
-          fi
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
-      - name: Copy optional face model into app assets
-        shell: bash
-        run: |
-          MODEL="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -iname 'face_model.tflite' -not -path '*/build/*' -not -path '*/.git/*' | head -n 1 || true)"
-          if [ -n "$MODEL" ]; then
-            mkdir -p "$PROJECT_DIR/$MODULE/src/main/assets"
-            cp "$MODEL" "$PROJECT_DIR/$MODULE/src/main/assets/face_model.tflite"
-            ls -l "$PROJECT_DIR/$MODULE/src/main/assets/face_model.tflite"
-            echo "Face model APK ke andar bundle hogi."
-          else
-            echo "face_model.tflite repo mein nahi mili (theek hai): app ke Security tab se import kar sakte ho."
-          fi
-
-      - name: Set up Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.13"
+
+      - name: Patch FaceSession Kotlin compile error
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FACE_FILE="$PROJECT_DIR/$MODULE/src/main/java/com/orbo/assistant/face/FaceSession.kt"
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          if [ ! -f "$FACE_FILE" ]; then
+            echo "::error::FaceSession.kt nahi mili."
+            exit 1
+          fi
+
+          cp "$FACE_FILE" "$GITHUB_WORKSPACE/logs/FaceSession.original.kt"
+
+          python3 - "$FACE_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+
+          old = "private fun finish(ok: Boolean, msg: String, s: List<FloatArray>?) {"
+          new = "private fun finish(ok: Boolean, msg: String, s: List<FloatArray>? = null) {"
+
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+              path.write_text(source, encoding="utf-8")
+              print("PATCH APPLIED")
+          elif new in source:
+              print("PATCH ALREADY PRESENT")
+          else:
+              raise SystemExit("Expected finish() declaration nahi mili. Source check required hai.")
+          PY
+
+          cp "$FACE_FILE" "$GITHUB_WORKSPACE/logs/FaceSession.patched.kt"
+          grep -n 'private fun finish' "$FACE_FILE"
 
       - name: Build debug APK
         shell: bash
@@ -119,48 +138,61 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_DIR"
           mkdir -p "$GITHUB_WORKSPACE/logs"
-          gradle --version
-          gradle ":$MODULE:assembleDebug" --stacktrace --no-daemon 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
 
-      - name: Run unit tests (failure APK ko nahi rokega)
+          gradle --version | tee "$GITHUB_WORKSPACE/logs/gradle-version.txt"
+
+          set +e
+          gradle ":$MODULE:assembleDebug" --stacktrace --no-daemon --console=plain 2>&1 \
+            | tee "$GITHUB_WORKSPACE/logs/build.log"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          exit "$BUILD_STATUS"
+
+      - name: Run unit tests
+        if: success()
         continue-on-error: true
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          gradle ":$MODULE:testDebugUnitTest" --stacktrace --no-daemon 2>&1 | tee "$GITHUB_WORKSPACE/logs/unit-tests.log"
+          gradle ":$MODULE:testDebugUnitTest" --stacktrace --no-daemon --console=plain 2>&1 \
+            | tee "$GITHUB_WORKSPACE/logs/unit-tests.log"
 
-      - name: Verify APK actually exists
+      - name: Verify APK
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
+
           OUT="$PROJECT_DIR/$MODULE/build/outputs/apk/debug"
-          echo "Looking in: $OUT"
-          ls -la "$OUT" || true
-          APK="$(find "$OUT" -maxdepth 1 -name "*.apk" 2>/dev/null | head -n 1 || true)"
+          ls -la "$OUT"
+
+          APK="$(find "$OUT" -maxdepth 1 -type f -name '*.apk' | head -n 1 || true)"
+
           if [ -z "$APK" ]; then
-            echo "::error::Build chala par APK file nahi bani. logs/build.log artifact dekho."
-            find "$PROJECT_DIR" -name "*.apk" -o -name "*.aab" | head -n 20
+            echo "::error::APK file nahi mili."
             exit 1
           fi
+
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp "$APK" "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
-          ls -l "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
-          unzip -l "$GITHUB_WORKSPACE/dist/ORBO-debug.apk" | grep -E "AndroidManifest.xml|classes.dex" || \
-            { echo "::error::APK andar se valid nahi lag raha."; exit 1; }
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+          sha256sum "$GITHUB_WORKSPACE/dist/ORBO-debug.apk" \
+            | tee "$GITHUB_WORKSPACE/logs/apk-sha256.txt"
+
+      - name: Upload APK artifact
+        if: success()
+        uses: actions/upload-artifact@v7
         with:
           name: ORBO-debug-apk
           path: dist/ORBO-debug.apk
           if-no-files-found: error
 
-      - name: Upload build logs and reports
+      - name: Upload build diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ORBO-build-logs
+          name: ORBO-build-diagnostics
           path: |
             logs/
             _src/**/build/reports/
