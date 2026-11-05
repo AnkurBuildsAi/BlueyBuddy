@@ -83,16 +83,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "8.13"
+          packages: platform-tools
+          accept-android-sdk-licenses: "yes"
+          log-accepted-android-sdk-licenses: "false"
 
       - name: Patch FaceSession Kotlin compile error
         shell: bash
@@ -131,6 +125,11 @@ jobs:
 
           cp "$FACE_FILE" "$GITHUB_WORKSPACE/logs/FaceSession.patched.kt"
           grep -n 'private fun finish' "$FACE_FILE"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.13"
 
       - name: Build debug APK
         shell: bash
