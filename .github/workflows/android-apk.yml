@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "ORBO_Android_Full_Source.zip"
+      - "ORBO_App_Source.zip"
       - ".github/workflows/android-apk.yml"
 
 permissions:
@@ -27,8 +27,8 @@ jobs:
           ls -la
 
           ZIP=""
-          if [ -f "ORBO_Android_Full_Source.zip" ]; then
-            ZIP="ORBO_Android_Full_Source.zip"
+          if [ -f "ORBO_App_Source.zip" ]; then
+            ZIP="ORBO_App_Source.zip"
           else
             ZIP="$(ls -1 *.zip 2>/dev/null | head -n 1 || true)"
           fi
@@ -93,6 +93,19 @@ jobs:
             tail -n 5 /tmp/licenses.log || true
           else
             echo "::warning::sdkmanager nahi mila: $SDKM"
+          fi
+
+      - name: Copy optional face model into app assets
+        shell: bash
+        run: |
+          MODEL="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -iname 'face_model.tflite' -not -path '*/build/*' -not -path '*/.git/*' | head -n 1 || true)"
+          if [ -n "$MODEL" ]; then
+            mkdir -p "$PROJECT_DIR/$MODULE/src/main/assets"
+            cp "$MODEL" "$PROJECT_DIR/$MODULE/src/main/assets/face_model.tflite"
+            ls -l "$PROJECT_DIR/$MODULE/src/main/assets/face_model.tflite"
+            echo "Face model APK ke andar bundle hogi."
+          else
+            echo "face_model.tflite repo mein nahi mili (theek hai): app ke Security tab se import kar sakte ho."
           fi
 
       - name: Set up Gradle 8.13
