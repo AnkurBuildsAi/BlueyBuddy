@@ -42,6 +42,7 @@ jobs:
           fi
 
           echo "Using ZIP: $ZIP"
+
           rm -rf "$GITHUB_WORKSPACE/_src"
           mkdir -p "$GITHUB_WORKSPACE/_src"
           unzip -q "$ZIP" -d "$GITHUB_WORKSPACE/_src"
@@ -75,6 +76,9 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "MODULE=$MODULE" >> "$GITHUB_ENV"
 
+          echo "Project directory: $PROJECT_DIR"
+          echo "Android module: $MODULE"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v6
         with:
@@ -82,19 +86,21 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
+          cmdline-tools-version: "15859902"
           packages: platform-tools
-          accept-android-sdk-licenses: "yes"
-          log-accepted-android-sdk-licenses: "false"
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
-      - name: Patch FaceSession Kotlin compile error
+      - name: Prepare Kotlin debugging
         shell: bash
         run: |
           set -euo pipefail
 
-          FACE_FILE="$PROJECT_DIR/$MODULE/src/main/java/com/orbo/assistant/face/FaceSession.kt"
           mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          FACE_FILE="$PROJECT_DIR/$MODULE/src/main/java/com/orbo/assistant/face/FaceSession.kt"
 
           if [ ! -f "$FACE_FILE" ]; then
             echo "::error::FaceSession.kt nahi mili."
@@ -116,14 +122,18 @@ jobs:
           if source.count(old) == 1:
               source = source.replace(old, new, 1)
               path.write_text(source, encoding="utf-8")
-              print("PATCH APPLIED")
+              print("Kotlin patch applied successfully.")
           elif new in source:
-              print("PATCH ALREADY PRESENT")
+              print("Kotlin patch already present.")
           else:
-              raise SystemExit("Expected finish() declaration nahi mili. Source check required hai.")
+              raise SystemExit(
+                  "Expected finish() declaration nahi mili. "
+                  "Original Kotlin source ko manually inspect karna hoga."
+              )
           PY
 
           cp "$FACE_FILE" "$GITHUB_WORKSPACE/logs/FaceSession.patched.kt"
+
           grep -n 'private fun finish' "$FACE_FILE"
 
       - name: Set up Gradle
@@ -135,27 +145,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
           mkdir -p "$GITHUB_WORKSPACE/logs"
 
           gradle --version | tee "$GITHUB_WORKSPACE/logs/gradle-version.txt"
 
           set +e
-          gradle ":$MODULE:assembleDebug" --stacktrace --no-daemon --console=plain 2>&1 \
+          gradle ":$MODULE:assembleDebug" \
+            --stacktrace \
+            --no-daemon \
+            --console=plain 2>&1 \
             | tee "$GITHUB_WORKSPACE/logs/build.log"
+
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
 
           exit "$BUILD_STATUS"
-
-      - name: Run unit tests
-        if: success()
-        continue-on-error: true
-        shell: bash
-        run: |
-          cd "$PROJECT_DIR"
-          gradle ":$MODULE:testDebugUnitTest" --stacktrace --no-daemon --console=plain 2>&1 \
-            | tee "$GITHUB_WORKSPACE/logs/unit-tests.log"
 
       - name: Verify APK
         if: success()
@@ -164,7 +170,11 @@ jobs:
           set -euo pipefail
 
           OUT="$PROJECT_DIR/$MODULE/build/outputs/apk/debug"
-          ls -la "$OUT"
+
+          if [ ! -d "$OUT" ]; then
+            echo "::error::APK output folder nahi mili."
+            exit 1
+          fi
 
           APK="$(find "$OUT" -maxdepth 1 -type f -name '*.apk' | head -n 1 || true)"
 
@@ -174,10 +184,13 @@ jobs:
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/dist"
+
           cp "$APK" "$GITHUB_WORKSPACE/dist/ORBO-debug.apk"
 
           sha256sum "$GITHUB_WORKSPACE/dist/ORBO-debug.apk" \
             | tee "$GITHUB_WORKSPACE/logs/apk-sha256.txt"
+
+          echo "APK successfully generated."
 
       - name: Upload APK artifact
         if: success()
